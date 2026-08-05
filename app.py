@@ -20,7 +20,7 @@ try:
 except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
-# 3. Automatische Parser Functie
+# 3. Geavanceerde Parser Functie
 def parse_receipt_text(text):
     text_lower = text.lower()
     
@@ -30,10 +30,10 @@ def parse_receipt_text(text):
     datum = datetime.date.today()
     betaalmethode = "Pin"
     
-    # Winkelherkenning
-    if "poiesz" in text_lower:
+    # 1. Winkelherkenning (inclusief bekende OCR spelfouten)
+    if any(k in text_lower for k in ["poiesz", "polesz", "poies"]):
         winkel = "Poiesz"
-    elif "albert heijn" in text_lower or " ah " in text_lower:
+    elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl"]):
         winkel = "Albert Heijn"
     elif "jumbo" in text_lower:
         winkel = "Jumbo"
@@ -43,24 +43,35 @@ def parse_receipt_text(text):
         winkel = "Aldi"
     elif "plus" in text_lower:
         winkel = "Plus"
+    elif "dirk" in text_lower:
+        winkel = "Dirk"
 
-    # Totaalbedrag extraheren
-    totaal_match = re.search(r'(?:totaal|total|eur)\s*[:€]?\s*(\d+[.,]\d{2})', text_lower)
-    if totaal_match:
-        try:
-            totaal = float(totaal_match.group(1).replace(',', '.'))
-        except ValueError:
-            pass
+    # 2. Totaalbedrag (pakt 'Totaal; 2,65 EUR', 'totaal €2,65', 'PIN €2,65', etc.)
+    totaal_matches = re.findall(r'(?:totaal|total|eur|pin)[^\d]*(\d+[.,‚]\d{2})', text_lower)
+    if totaal_matches:
+        # Neem de laatste treffer op de bon (meestal het daadwerkelijke eindbedrag)
+        for m in reversed(totaal_matches):
+            try:
+                val_str = m.replace('‚', '.').replace(',', '.')
+                val = float(val_str)
+                if val > 0:
+                    totaal = val
+                    break
+            except ValueError:
+                continue
 
-    # Statiegeld extraheren
-    statie_match = re.search(r'statie?\s*geld[^\d]*(\d+[.,]\d{2})', text_lower)
+    # 3. Statiegeld (pakt ook 'STAT IEGELD ) ‚15' of ',15')
+    statie_match = re.search(r'stat[a-z\s]*geld[^\d,.‚]*(\d*[,.‚]\d{2})', text_lower)
     if statie_match:
         try:
-            statiegeld = float(statie_match.group(1).replace(',', '.'))
+            raw_val = statie_match.group(1).replace('‚', '.').replace(',', '.')
+            if raw_val.startswith('.'):
+                raw_val = "0" + raw_val
+            statiegeld = float(raw_val)
         except ValueError:
             pass
 
-    # Datum extraheren (DD-MM-YYYY of DD/MM/YYYY)
+    # 4. Datum (DD-MM-YYYY of DD/MM/YYYY)
     datum_match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', text)
     if datum_match:
         try:
@@ -71,10 +82,10 @@ def parse_receipt_text(text):
         except ValueError:
             pass
 
-    # Betaalmethode herkennen
-    if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip"]):
+    # 5. Betaalmethode
+    if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip", "maestro"]):
         betaalmethode = "Pin"
-    elif "contant" in text_lower or "cash" in text_lower:
+    elif any(k in text_lower for k in ["contant", "cash", "wisselgeld"]):
         betaalmethode = "Contant"
 
     return winkel, datum, totaal, statiegeld, betaalmethode
@@ -99,7 +110,7 @@ if uploaded_file is not None:
         except Exception:
             text = pytesseract.image_to_string(gray_image)
 
-        # Automatische data-extractie
+        # Automatische data-extractie via geoptimaliseerde parser
         auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
 
     st.subheader("Geëxtraheerde Tekst")
