@@ -5,6 +5,7 @@ from PIL import Image, ImageOps
 import pandas as pd
 import datetime
 import io
+import re
 
 # 1. Page Configuration
 st.set_page_config(page_title="Kassabonnen Scanner", page_icon="🧾", layout="centered")
@@ -17,49 +18,109 @@ try:
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error("Kon niet verbinden met Supabase. Controleer of SUPABASE_URL en SUPABASE_KEY goed zijn ingesteld in Streamlit Secrets.")
+    st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
-# 3. Upload & Camera Functionaliteit (JPG, JPEG, PNG)
+# 3. Automatische Parser Functie
+def parse_receipt_text(text):
+    text_lower = text.lower()
+    
+    winkel = ""
+    totaal = 0.0
+    statiegeld = 0.0
+    datum = datetime.date.today()
+    betaalmethode = "Pin"
+    
+    # Winkelherkenning
+    if "poiesz" in text_lower:
+        winkel = "Poiesz"
+    elif "albert heijn" in text_lower or " ah " in text_lower:
+        winkel = "Albert Heijn"
+    elif "jumbo" in text_lower:
+        winkel = "Jumbo"
+    elif "lidl" in text_lower:
+        winkel = "Lidl"
+    elif "aldi" in text_lower:
+        winkel = "Aldi"
+    elif "plus" in text_lower:
+        winkel = "Plus"
+
+    # Totaalbedrag extraheren
+    totaal_match = re.search(r'(?:totaal|total|eur)\s*[:€]?\s*(\d+[.,]\d{2})', text_lower)
+    if totaal_match:
+        try:
+            totaal = float(totaal_match.group(1).replace(',', '.'))
+        except ValueError:
+            pass
+
+    # Statiegeld extraheren
+    statie_match = re.search(r'statie?\s*geld[^\d]*(\d+[.,]\d{2})', text_lower)
+    if statie_match:
+        try:
+            statiegeld = float(statie_match.group(1).replace(',', '.'))
+        except ValueError:
+            pass
+
+    # Datum extraheren (DD-MM-YYYY of DD/MM/YYYY)
+    datum_match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', text)
+    if datum_match:
+        try:
+            d, m, y = map(int, datum_match.groups())
+            if y < 100:
+                y += 2000
+            datum = datetime.date(y, m, d)
+        except ValueError:
+            pass
+
+    # Betaalmethode herkennen
+    if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip"]):
+        betaalmethode = "Pin"
+    elif "contant" in text_lower or "cash" in text_lower:
+        betaalmethode = "Contant"
+
+    return winkel, datum, totaal, statiegeld, betaalmethode
+
+# 4. Upload & Camera Functionaliteit (JPG, JPEG, PNG)
 uploaded_file = st.file_uploader(
     "Upload of maak een foto van een kassabon", 
     type=["jpg", "jpeg", "png"]
 )
 
 if uploaded_file is not None:
-    # Open afbeelding
     image = Image.open(uploaded_file)
-    
-    # Automatisch corrigeren van de oriëntatie op basis van EXIF-data (telefoonfoto's)
+    # Herstel EXIF-rotatie van telefoons
     image = ImageOps.exif_transpose(image)
     
     st.image(image, caption="Geüploade Kassabon", use_container_width=True)
 
-    with st.spinner("OCR verwerken..."):
-        # Omzetten naar grijswaarden voor betere contrast-herkenning
+    with st.spinner("OCR verwerken en gegevens uitlezen..."):
         gray_image = image.convert("L")
-        
         try:
-            # Probeer eerst met het Nederlandse taalpakket
             text = pytesseract.image_to_string(gray_image, lang="nld")
         except Exception:
-            # Fallback als nld pakket niet beschikbaar is
             text = pytesseract.image_to_string(gray_image)
-    
+
+        # Automatische data-extractie
+        auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
+
     st.subheader("Geëxtraheerde Tekst")
     with st.expander("Bekijk ruwe OCR-tekst"):
-        st.text(text if text.strip() else "Geen tekst herkend. Zorg voor voldoende licht en een scherpe foto.")
+        st.text(text if text.strip() else "Geen tekst herkend.")
 
     st.subheader("Details Invoeren & Controleren")
     
     col1, col2 = st.columns(2)
     with col1:
-        winkel = st.text_input("Winkelnaam", value="")
-        datum = st.date_input("Datum bon", value=datetime.date.today())
-        totaal_bedrag = st.number_input("Totaalbedrag (€)", min_value=0.0, format="%.2f")
+        winkel = st.text_input("Winkelnaam", value=auto_winkel)
+        datum = st.date_input("Datum bon", value=auto_datum)
+        totaal_bedrag = st.number_input("Totaalbedrag (€)", value=auto_totaal, min_value=0.0, format="%.2f")
     
     with col2:
-        statiegeld = st.number_input("Statiegeld (€)", min_value=0.0, format="%.2f")
-        betaalmethode = st.selectbox("Betaalmethode", ["Pin", "Contant", "Creditcard", "Anders"])
+        statiegeld = st.number_input("Statiegeld (€)", value=auto_statiegeld, min_value=0.0, format="%.2f")
+        
+        betaal_opties = ["Pin", "Contant", "Creditcard", "Anders"]
+        betaal_index = betaal_opties.index(auto_betaalmethode) if auto_betaalmethode in betaal_opties else 0
+        betaalmethode = st.selectbox("Betaalmethode", betaal_opties, index=betaal_index)
+        
         categorie = st.selectbox("Categorie", ["Boodschappen", "Huishouden", "Hobby / Electronica", "Overig"])
 
     is_self = st.checkbox("Eigen uitgave (Self)", value=True)
@@ -68,26 +129,25 @@ if uploaded_file is not None:
     if st.button("💾 Opslaan in Database", type="primary"):
         with st.spinner("Opslaan in Supabase..."):
             try:
-                # Afbeelding klaarmaken voor upload (omzetten naar bytes)
+                # Converteren naar bytes voor upload
                 img_bytes = io.BytesIO()
                 image.convert("RGB").save(img_bytes, format="JPEG")
                 img_data = img_bytes.getvalue()
                 
-                # Unieke bestandsnaam genereren
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"bon_{timestamp}.jpg"
                 
-                # 1. Foto uploaden naar Supabase Storage bucket
+                # 1. Foto uploaden naar Storage Bucket
                 supabase.storage.from_("bonnen-fotos").upload(
                     path=filename,
                     file=img_data,
                     file_options={"content-type": "image/jpeg"}
                 )
                 
-                # Publieke URL ophalen van het geüploade bestand
+                # Publieke URL ophalen
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
-                # 2. Metadata opslaan in de Postgres database tabel 'kassabonnen'
+                # 2. Opslaan in database tabel
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
@@ -107,7 +167,7 @@ if uploaded_file is not None:
 
 st.divider()
 
-# 4. Inzage & Excel Export
+# 5. Overzicht & Excel Export
 st.subheader("📊 Inzage & Excel Export")
 
 if st.button("Laden van opgeslagen bonnen"):
@@ -117,7 +177,6 @@ if st.button("Laden van opgeslagen bonnen"):
             df = pd.DataFrame(res.data)
             st.dataframe(df)
             
-            # Excel export genereren
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Kassabonnen")
