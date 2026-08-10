@@ -21,7 +21,7 @@ except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
 # ---------------------------------------------------------
-# 3. OVERZICHT BOVENAAN DE PAGINA
+# 3. OVERZICHT BOVENAAN DE PAGINA (MET DECORRECTE BEREKENING)
 # ---------------------------------------------------------
 st.subheader("📈 Overzicht Uitgaven")
 
@@ -30,17 +30,30 @@ try:
     if res.data:
         df_stats = pd.DataFrame(res.data)
         
-        # Zorg dat numerieke kolommen goed berekend worden
-        df_stats["totaalprijs"] = pd.to_numeric(df_stats.get("totaalprijs", 0), errors="coerce").fillna(0)
+        # Zorg dat numerieke kolommen goed als float worden gelezen
+        df_stats["totaalprijs"] = pd.to_numeric(df_stats.get("totaalprijs", 0), errors="coerce").fillna(0.0)
+        df_stats["eigen_bedrag"] = pd.to_numeric(df_stats.get("eigen_bedrag", 0), errors="coerce").fillna(0.0)
         
         totaal_uitgaven = df_stats["totaalprijs"].sum()
         
-        # Filteren op 'Zelf' en 'Niet zelf'
-        zelf_total = df_stats[df_stats["zelf"] == "Zelf"]["totaalprijs"].sum()
-        niet_zelf_total = df_stats[df_stats["zelf"] == "Niet zelf"]["totaalprijs"].sum()
+        # Berekening voor Zelf vs Niet Zelf
+        zelf_total = 0.0
+        niet_zelf_total = 0.0
         
-        # Als er ook "Gedeeltelijk zelf" is opgeslagen, telt dat op bij het totaal overzicht
-        gedeeltelijk_total = df_stats[df_stats["zelf"] == "Gedeeltelijk zelf"]["totaalprijs"].sum()
+        for _, row in df_stats.iterrows():
+            status = str(row.get("zelf", "")).lower()
+            tot = float(row.get("totaalprijs", 0.0))
+            eigen = float(row.get("eigen_bedrag", 0.0)) if "eigen_bedrag" in row else 0.0
+            
+            if status == "zelf" or status == "ja":
+                zelf_total += tot
+            elif status == "niet zelf" or status == "nee":
+                niet_zelf_total += tot
+            elif status == "gedeeltelijk zelf":
+                zelf_total += eigen
+                niet_zelf_total += max(0.0, tot - eigen)
+            else:
+                zelf_total += tot
 
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         col_stat1.metric("Totaal Uitgegeven", f"€ {totaal_uitgaven:.2f}")
@@ -288,6 +301,7 @@ if uploaded_file is not None:
                 
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
+                # Gegevens inclusief 'eigen_bedrag' sturen naar Supabase
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
@@ -296,6 +310,7 @@ if uploaded_file is not None:
                     "betaalwijze": betaalmethode,
                     "categorie": categorie,
                     "zelf": zelf_optie,
+                    "eigen_bedrag": eigen_bedrag,
                     "retour": "Ja" if retour_status else "Nee",
                     "terug_bedrag": terug_bedrag,
                     "afbeelding_url": image_url
