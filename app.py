@@ -22,7 +22,7 @@ except Exception as e:
 
 # 3. Geavanceerde Parser Functie
 def parse_receipt_text(text):
-    # Verwijder spaties tussen letters in specifieke woorden zoals "T o t a a l" op Poiesz bonnen
+    # Verwijder spaties tussen letters in specifieke woorden zoals "T o t a a l"
     text_clean = re.sub(r't\s*o\s*t\s*a\s*a\s*l', 'totaal', text, flags=re.IGNORECASE)
     text_clean = re.sub(r's\s*u\s*b\s*t\s*o\s*t\s*a\s*a\s*l', 'subtotaal', text_clean, flags=re.IGNORECASE)
     
@@ -35,8 +35,8 @@ def parse_receipt_text(text):
     datum = datetime.date.today()
     betaalmethode = "Pin"
     
-    # 1. Winkelherkenning
-    if any(k in text_lower for k in ["poiesz", "polesz", "poies", "po1esz"]):
+    # 1. Winkelherkenning (inclusief OCR-variaties zoals 'poress')
+    if any(k in text_lower for k in ["poiesz", "polesz", "poies", "po1esz", "poress"]):
         winkel = "Poiesz"
     elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl", "albert"]):
         winkel = "Albert Heijn"
@@ -86,7 +86,7 @@ def parse_receipt_text(text):
                 except Exception:
                     pass
 
-    # Helper functie voor het uitlezen van bedragen (ook ',15' -> 0.15)
+    # Helper functie voor bedragen
     def extract_amounts(s):
         found = []
         matches = re.findall(r'(\d*[,.‚]\d{2})', s)
@@ -103,18 +103,17 @@ def parse_receipt_text(text):
         return found
 
     # 4. Totaalbedrag
-    # Stap A: Direct zoeken naar regels met 'totaal', 'subtotaal', 'te betalen'
+    # Stap A: Zoek op regels met 'totaal' of 'subtotaal' (sluit BTW en KORTING uit)
     for idx, line in enumerate(reversed(lines)):
         real_idx = len(lines) - 1 - idx
         l_low = line.lower()
         
         if any(k in l_low for k in ["totaal", "subtotaal", "te betalen", "bedrag"]):
-            if "korting" in l_low or "wisselgeld" in l_low:
+            # Negeer regels die gaan over BTW, korting of wisselgeld!
+            if any(x in l_low for x in ["btw", "korting", "wisselgeld"]):
                 continue
             
-            # Check huidige regel
             amounts = extract_amounts(l_low)
-            # Check volgende regel als er geen bedrag op dezelfde regel stond
             if not amounts and real_idx + 1 < len(lines):
                 amounts = extract_amounts(lines[real_idx + 1].lower())
                 
@@ -122,24 +121,24 @@ def parse_receipt_text(text):
                 totaal = max(amounts)
                 break
 
-    # Stap B: Als 'totaal' niks opleverde, zoek op PIN / EUR / € regels
+    # Stap B: Fallback naar PIN / EUR / € regels
     if totaal == 0.0:
         for idx, line in enumerate(reversed(lines)):
             l_low = line.lower()
             if any(k in l_low for k in ["pin", "eur", "€"]):
-                if any(x in l_low for x in ["korting", "wisselgeld", "kaart", "terminal", "kassa"]):
+                if any(x in l_low for x in ["btw", "korting", "wisselgeld", "kaart", "terminal", "kassa"]):
                     continue
                 amounts = extract_amounts(l_low)
                 if amounts:
                     totaal = max(amounts)
                     break
 
-    # Stap C: Fallback naar alle getallen op de bon (< 500)
+    # Stap C: Fallback naar het hoogste geldige bedrag op de bon
     if totaal == 0.0:
         all_amounts = []
         for line in lines:
             l_low = line.lower()
-            if any(x in l_low for x in ["korting", "wisselgeld", "kaart", "transactie", "terminal", "autorisatie", "kassa"]):
+            if any(x in l_low for x in ["btw", "korting", "wisselgeld", "kaart", "transactie", "terminal", "autorisatie", "kassa"]):
                 continue
             amounts = extract_amounts(l_low)
             all_amounts.extend([a for a in amounts if a <= 500.0])
@@ -234,16 +233,18 @@ if uploaded_file is not None:
                 
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
+                # Afgestemd op de exacte kolomnamen van jouw Supabase tabel
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
-                    "totaal_bedrag": totaal_bedrag,
+                    "totaalprijs": totaal_bedrag,
                     "statiegeld": statiegeld,
                     "betaalwijze": betaalmethode,
                     "categorie": categorie,
-                    "is_self": is_self,
-                    "retour_status": retour_status,
-                    "foto_url": image_url
+                    "zelf": "Ja" if is_self else "Nee",
+                    "retour": "Ja" if retour_status else "Nee",
+                    "terug_bedrag": 0.0,
+                    "afbeelding_url": image_url
                 }
                 
                 supabase.table("kassabonnen").insert(data).execute()
