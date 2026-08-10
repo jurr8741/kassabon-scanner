@@ -21,7 +21,7 @@ except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
 # ---------------------------------------------------------
-# 3. OVERZICHT BOVENAAN DE PAGINA (MET DECORRECTE BEREKENING)
+# 3. OVERZICHT BOVENAAN DE PAGINA (GESORTEERD OP OP ZELF/NIET ZELF EN PIN/CONTANT)
 # ---------------------------------------------------------
 st.subheader("📈 Overzicht Uitgaven")
 
@@ -36,29 +36,66 @@ try:
         
         totaal_uitgaven = df_stats["totaalprijs"].sum()
         
-        # Berekening voor Zelf vs Niet Zelf
-        zelf_total = 0.0
-        niet_zelf_total = 0.0
+        # Buffers voor de categorieën
+        zelf_pin = 0.0
+        zelf_contant = 0.0
+        
+        niet_zelf_pin = 0.0
+        niet_zelf_contant = 0.0
         
         for _, row in df_stats.iterrows():
             status = str(row.get("zelf", "")).lower()
             tot = float(row.get("totaalprijs", 0.0))
             eigen = float(row.get("eigen_bedrag", 0.0)) if "eigen_bedrag" in row else 0.0
+            betaalwijze = str(row.get("betaalwijze", "")).lower()
             
-            if status == "zelf" or status == "ja":
-                zelf_total += tot
-            elif status == "niet zelf" or status == "nee":
-                niet_zelf_total += tot
+            # Bepaal hoofd-betaalmethode (check op 'contant' anders 'pin')
+            is_contant = "contant" in betaalwijze or "cash" in betaalwijze
+            
+            if status in ["zelf", "ja"]:
+                if is_contant:
+                    zelf_contant += tot
+                else:
+                    zelf_pin += tot
+            elif status in ["niet zelf", "nee"]:
+                if is_contant:
+                    niet_zelf_contant += tot
+                else:
+                    niet_zelf_pin += tot
             elif status == "gedeeltelijk zelf":
-                zelf_total += eigen
-                niet_zelf_total += max(0.0, tot - eigen)
+                # Eigen deel
+                if is_contant:
+                    zelf_contant += eigen
+                    niet_zelf_contant += max(0.0, tot - eigen)
+                else:
+                    zelf_pin += eigen
+                    niet_zelf_pin += max(0.0, tot - eigen)
             else:
-                zelf_total += tot
+                if is_contant:
+                    zelf_contant += tot
+                else:
+                    zelf_pin += tot
 
-        col_stat1, col_stat2, col_stat3 = st.columns(3)
-        col_stat1.metric("Totaal Uitgegeven", f"€ {totaal_uitgaven:.2f}")
-        col_stat2.metric("Zelf", f"€ {zelf_total:.2f}")
-        col_stat3.metric("Niet Zelf", f"€ {niet_zelf_total:.2f}")
+        # --- TONEN IN STREAMLIT ---
+        col_totaal, _, _ = st.columns(3)
+        col_totaal.metric("Totaal Uitgegeven", f"€ {totaal_uitgaven:.2f}")
+
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.markdown("### 👤 Zelf")
+            c1, c2 = st.columns(2)
+            c1.metric("💳 Pin", f"€ {zelf_pin:.2f}")
+            c2.metric("💶 Contant", f"€ {zelf_contant:.2f}")
+            st.caption(f"**Subtotaal Zelf:** € {zelf_pin + zelf_contant:.2f}")
+
+        with col_right:
+            st.markdown("### 👥 Niet zelf")
+            c3, c4 = st.columns(2)
+            c3.metric("💳 Pin", f"€ {niet_zelf_pin:.2f}")
+            c4.metric("💶 Contant", f"€ {niet_zelf_contant:.2f}")
+            st.caption(f"**Subtotaal Niet zelf:** € {niet_zelf_pin + niet_zelf_contant:.2f}")
+
     else:
         st.info("Nog geen uitgaven opgeslagen om een overzicht te tonen.")
 except Exception as e:
@@ -249,12 +286,31 @@ if uploaded_file is not None:
     
     with col2:
         statiegeld = st.number_input("Statiegeld (€)", value=auto_statiegeld, min_value=0.0, format="%.2f")
-        
-        betaal_opties = ["Pin", "Contant", "Creditcard", "Anders"]
-        betaal_index = betaal_opties.index(auto_betaalmethode) if auto_betaalmethode in betaal_opties else 0
-        betaalmethode = st.selectbox("Betaalmethode", betaal_opties, index=betaal_index)
-        
         categorie = st.selectbox("Categorie", ["Boodschappen", "Huishouden", "Hobby / Electronica", "Overig"])
+
+    st.markdown("---")
+    st.markdown("**💳 Betaalmethodes (Max. 5)**")
+    
+    aantal_methodes = st.number_input("Aantal gebruikte betaalmethodes", min_value=1, max_value=5, value=1, step=1)
+
+    betaal_lijst = []
+    betaal_opties = ["Pin", "Contant", "Creditcard", "Cadeaubon", "Anders"]
+    
+    for i in range(int(aantal_methodes)):
+        col_bm1, col_bm2 = st.columns(2)
+        with col_bm1:
+            def_idx = betaal_opties.index(auto_betaalmethode) if (i == 0 and auto_betaalmethode in betaal_opties) else 0
+            bm_type = st.selectbox(f"Betaalmethode {i+1}", betaal_opties, index=def_idx, key=f"bm_type_{i}")
+        with col_bm2:
+            def_val = totaal_bedrag if aantal_methodes == 1 else round(totaal_bedrag / aantal_methodes, 2)
+            bm_bedrag = st.number_input(f"Bedrag Methode {i+1} (€)", min_value=0.0, value=def_val, format="%.2f", key=f"bm_bedrag_{i}")
+        
+        betaal_lijst.append(f"{bm_type}: €{bm_bedrag:.2f}")
+
+    # Gecombineerde string om op te slaan in Supabase (bijv. "Pin: €10.00 | Contant: €5.00")
+    gecombineerde_betaalwijze = " | ".join(betaal_lijst)
+
+    st.markdown("---")
 
     # Statiegeld koppeling met Terug Bedrag
     default_terug_bedrag = statiegeld if statiegeld > 0 else 0.0
@@ -301,13 +357,12 @@ if uploaded_file is not None:
                 
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
-                # Gegevens inclusief 'eigen_bedrag' sturen naar Supabase
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
                     "totaalprijs": totaal_bedrag,
                     "statiegeld": statiegeld,
-                    "betaalwijze": betaalmethode,
+                    "betaalwijze": gecombineerde_betaalwijze,
                     "categorie": categorie,
                     "zelf": zelf_optie,
                     "eigen_bedrag": eigen_bedrag,
