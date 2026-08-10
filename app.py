@@ -22,8 +22,12 @@ except Exception as e:
 
 # 3. Geavanceerde Parser Functie
 def parse_receipt_text(text):
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    text_lower = text.lower()
+    # Verwijder spaties tussen letters in specifieke woorden zoals "T o t a a l" op Poiesz bonnen
+    text_clean = re.sub(r't\s*o\s*t\s*a\s*a\s*l', 'totaal', text, flags=re.IGNORECASE)
+    text_clean = re.sub(r's\s*u\s*b\s*t\s*o\s*t\s*a\s*a\s*l', 'subtotaal', text_clean, flags=re.IGNORECASE)
+    
+    lines = [l.strip() for l in text_clean.split('\n') if l.strip()]
+    text_lower = text_clean.lower()
     
     winkel = ""
     totaal = 0.0
@@ -47,17 +51,14 @@ def parse_receipt_text(text):
     elif "dirk" in text_lower:
         winkel = "Dirk"
 
-    # 2. Datum (Ondersteunt DD-MM-YYYY, YYYY/MM/DD, DD.MM.YYYY, etc.)
-    # Vangt zowel DD-MM-YYYY als YYYY-MM-DD
-    datum_matches = re.findall(r'\b(\d{1,4})[-/. ](\d{1,2})[-/. ](\d{1,4})\b', text)
+    # 2. Datum (DD-MM-YYYY, YYYY/MM/DD, DD.MM.YYYY, etc.)
+    datum_matches = re.findall(r'\b(\d{1,4})[-/. ](\d{1,2})[-/. ](\d{1,4})\b', text_clean)
     for p1, p2, p3 in datum_matches:
         try:
             v1, v2, v3 = int(p1), int(p2), int(p3)
-            # Scenario YYYY-MM-DD
             if v1 > 1000 and 1 <= v2 <= 12 and 1 <= v3 <= 31:
                 datum = datetime.date(v1, v2, v3)
                 break
-            # Scenario DD-MM-YYYY of DD-MM-YY
             else:
                 d, m, y = v1, v2, v3
                 if y < 100:
@@ -68,7 +69,7 @@ def parse_receipt_text(text):
         except Exception:
             continue
 
-    # 3. Statiegeld (Zoekt specifiek op statiegeld regels)
+    # 3. Statiegeld
     for line in lines:
         l_low = line.lower()
         if "stat" in l_low or "emballage" in l_low:
@@ -85,38 +86,64 @@ def parse_receipt_text(text):
                 except Exception:
                     pass
 
-    # 4. Totaalbedrag
-    # Stap A: Direct zoeken naar trefwoorden t.o.v. bedragen
-    for line in reversed(lines):
-        l_low = line.lower()
-        if "korting" in l_low or "wisselgeld" in l_low or "punten" in l_low:
-            continue
-        
-        match = re.search(r'(?:\btotaal\b|subtotaal|\beur\b|\bpin\b)[^\d]*(\d+[.,‚]\d{2})', l_low)
-        if match:
+    # Helper functie voor het uitlezen van bedragen (ook ',15' -> 0.15)
+    def extract_amounts(s):
+        found = []
+        matches = re.findall(r'(\d*[,.‚]\d{2})', s)
+        for m in matches:
             try:
-                val = float(match.group(1).replace('‚', '.').replace(',', '.'))
-                if val > 0:
-                    totaal = val
-                    break
+                raw = m.replace('‚', '.').replace(',', '.')
+                if raw.startswith('.'):
+                    raw = "0" + raw
+                v = float(raw)
+                if v > 0:
+                    found.append(v)
             except Exception:
                 pass
+        return found
 
-    # Stap B: Fallback - pak het hoogste aannemelijke bedrag op de bon
+    # 4. Totaalbedrag
+    # Stap A: Direct zoeken naar regels met 'totaal', 'subtotaal', 'te betalen'
+    for idx, line in enumerate(reversed(lines)):
+        real_idx = len(lines) - 1 - idx
+        l_low = line.lower()
+        
+        if any(k in l_low for k in ["totaal", "subtotaal", "te betalen", "bedrag"]):
+            if "korting" in l_low or "wisselgeld" in l_low:
+                continue
+            
+            # Check huidige regel
+            amounts = extract_amounts(l_low)
+            # Check volgende regel als er geen bedrag op dezelfde regel stond
+            if not amounts and real_idx + 1 < len(lines):
+                amounts = extract_amounts(lines[real_idx + 1].lower())
+                
+            if amounts:
+                totaal = max(amounts)
+                break
+
+    # Stap B: Als 'totaal' niks opleverde, zoek op PIN / EUR / € regels
+    if totaal == 0.0:
+        for idx, line in enumerate(reversed(lines)):
+            l_low = line.lower()
+            if any(k in l_low for k in ["pin", "eur", "€"]):
+                if any(x in l_low for x in ["korting", "wisselgeld", "kaart", "terminal", "kassa"]):
+                    continue
+                amounts = extract_amounts(l_low)
+                if amounts:
+                    totaal = max(amounts)
+                    break
+
+    # Stap C: Fallback naar alle getallen op de bon (< 500)
     if totaal == 0.0:
         all_amounts = []
         for line in lines:
             l_low = line.lower()
             if any(x in l_low for x in ["korting", "wisselgeld", "kaart", "transactie", "terminal", "autorisatie", "kassa"]):
                 continue
-            matches = re.findall(r'(\d+[.,‚]\d{2})', line)
-            for m in matches:
-                try:
-                    v = float(m.replace('‚', '.').replace(',', '.'))
-                    if 0.10 <= v <= 500.0:
-                        all_amounts.append(v)
-                except Exception:
-                    pass
+            amounts = extract_amounts(l_low)
+            all_amounts.extend([a for a in amounts if a <= 500.0])
+            
         if all_amounts:
             totaal = max(all_amounts)
 
@@ -128,7 +155,7 @@ def parse_receipt_text(text):
 
     return winkel, datum, totaal, statiegeld, betaalmethode
 
-# 4. Upload & Camera Functionaliteit (JPG, JPEG, PNG)
+# 4. Upload & Camera Functionaliteit
 uploaded_file = st.file_uploader(
     "Upload of maak een foto van een kassabon", 
     type=["jpg", "jpeg", "png"]
@@ -143,7 +170,6 @@ if uploaded_file is not None:
     text = ""
     with st.spinner("OCR verwerken en afbeelding optimaliseren..."):
         try:
-            # Afbeelding vergroten voor betere OCR van kleine letters op bonnen
             w, h = image.size
             if w < 1000:
                 scale = 1000 / w
@@ -155,14 +181,12 @@ if uploaded_file is not None:
             enhancer = ImageEnhance.Contrast(gray_image)
             contrast_image = enhancer.enhance(1.8)
             
-            # Probeer OCR met algemene PSM instelling
             text = pytesseract.image_to_string(contrast_image, lang="nld", config=r'--psm 3')
             if not text.strip():
                 text = pytesseract.image_to_string(contrast_image, config=r'--psm 6')
         except Exception as ocr_err:
             st.warning(f"OCR kon de afbeelding niet volledig verwerken: {ocr_err}")
 
-        # Automatische data-extractie
         try:
             auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
         except Exception:
@@ -215,7 +239,7 @@ if uploaded_file is not None:
                     "winkel": winkel,
                     "totaal_bedrag": totaal_bedrag,
                     "statiegeld": statiegeld,
-                    "betaalmethode": betaalmethode,
+                    "betaalwijze": betaalmethode,
                     "categorie": categorie,
                     "is_self": is_self,
                     "retour_status": retour_status,
