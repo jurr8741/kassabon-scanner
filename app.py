@@ -21,7 +21,7 @@ except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
 # ---------------------------------------------------------
-# 3. OVERZICHT BOVENAAN DE PAGINA (GESORTEERD OP OP ZELF/NIET ZELF EN PIN/CONTANT)
+# 3. OVERZICHT BOVENAAN DE PAGINA (GESORTEERD OP ZELF/NIET ZELF EN PIN/CONTANT)
 # ---------------------------------------------------------
 st.subheader("📈 Overzicht Uitgaven")
 
@@ -49,7 +49,6 @@ try:
             eigen = float(row.get("eigen_bedrag", 0.0)) if "eigen_bedrag" in row else 0.0
             betaalwijze = str(row.get("betaalwijze", "")).lower()
             
-            # Bepaal hoofd-betaalmethode (check op 'contant' anders 'pin')
             is_contant = "contant" in betaalwijze or "cash" in betaalwijze
             
             if status in ["zelf", "ja"]:
@@ -63,7 +62,6 @@ try:
                 else:
                     niet_zelf_pin += tot
             elif status == "gedeeltelijk zelf":
-                # Eigen deel
                 if is_contant:
                     zelf_contant += eigen
                     niet_zelf_contant += max(0.0, tot - eigen)
@@ -296,18 +294,41 @@ if uploaded_file is not None:
     betaal_lijst = []
     betaal_opties = ["Pin", "Contant", "Creditcard", "Cadeaubon", "Anders"]
     
+    opgeteld_bedrag = 0.0
+
     for i in range(int(aantal_methodes)):
         col_bm1, col_bm2 = st.columns(2)
-        with col_bm1:
-            def_idx = betaal_opties.index(auto_betaalmethode) if (i == 0 and auto_betaalmethode in betaal_opties) else 0
-            bm_type = st.selectbox(f"Betaalmethode {i+1}", betaal_opties, index=def_idx, key=f"bm_type_{i}")
-        with col_bm2:
-            def_val = totaal_bedrag if aantal_methodes == 1 else round(totaal_bedrag / aantal_methodes, 2)
-            bm_bedrag = st.number_input(f"Bedrag Methode {i+1} (€)", min_value=0.0, value=def_val, format="%.2f", key=f"bm_bedrag_{i}")
         
+        # Bepaal het automatisch resterende bedrag voor de huidige stap
+        resterend = max(0.0, totaal_bedrag - opgeteld_bedrag)
+        
+        with col_bm1:
+            def_idx = betaal_opties.index(auto_betaalmethode) if (i == 0 and auto_betaalmethode in betaal_opties) else (1 if i == 1 else 0)
+            bm_type = st.selectbox(f"Betaalmethode {i+1}", betaal_opties, index=def_idx, key=f"bm_type_{i}")
+        
+        with col_bm2:
+            # Als dit het laatste veld is, vul het restant in. Anders ook standaard het restant.
+            bm_bedrag = st.number_input(
+                f"Bedrag Methode {i+1} (€)", 
+                min_value=0.0, 
+                max_value=totaal_bedrag,
+                value=round(resterend, 2), 
+                format="%.2f", 
+                key=f"bm_bedrag_{i}"
+            )
+        
+        opgeteld_bedrag += bm_bedrag
         betaal_lijst.append(f"{bm_type}: €{bm_bedrag:.2f}")
 
-    # Gecombineerde string om op te slaan in Supabase (bijv. "Pin: €10.00 | Contant: €5.00")
+    # Resterend saldo feedback
+    verschil = totaal_bedrag - opgeteld_bedrag
+    if abs(verschil) < 0.01:
+        st.caption("✅ Het totaal van de betaalmethodes komt exact overeen met het totaalbedrag.")
+    elif verschil > 0:
+        st.info(f"💡 Er blijft nog **€ {verschil:.2f}** over om te verdelen.")
+    else:
+        st.warning(f"⚠️ Het totaal van de betaalmethodes is **€ {abs(verschil):.2f}** hoger dan het totaalbedrag.")
+
     gecombineerde_betaalwijze = " | ".join(betaal_lijst)
 
     st.markdown("---")
