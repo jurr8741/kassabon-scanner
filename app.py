@@ -1,7 +1,7 @@
 import streamlit as st
 from supabase import create_client, Client
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 import pandas as pd
 import datetime
 import io
@@ -22,6 +22,7 @@ except Exception as e:
 
 # 3. Geavanceerde Parser Functie
 def parse_receipt_text(text):
+    lines = text.split('\n')
     text_lower = text.lower()
     
     winkel = ""
@@ -30,7 +31,7 @@ def parse_receipt_text(text):
     datum = datetime.date.today()
     betaalmethode = "Pin"
     
-    # 1. Winkelherkenning (inclusief bekende OCR spelfouten)
+    # 1. Winkelherkenning
     if any(k in text_lower for k in ["poiesz", "polesz", "poies"]):
         winkel = "Poiesz"
     elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl"]):
@@ -46,30 +47,36 @@ def parse_receipt_text(text):
     elif "dirk" in text_lower:
         winkel = "Dirk"
 
-    # 2. Totaalbedrag (pakt 'Totaal; 2,65 EUR', 'totaal €2,65', 'PIN €2,65', etc.)
-    totaal_matches = re.findall(r'(?:totaal|total|eur|pin)[^\d]*(\d+[.,‚]\d{2})', text_lower)
-    if totaal_matches:
-        # Neem de laatste treffer op de bon (meestal het daadwerkelijke eindbedrag)
-        for m in reversed(totaal_matches):
+    # 2. Totaalbedrag (Slaat regels met 'korting' en 'subtotaal' expliciet over)
+    for line in reversed(lines):
+        line_lower = line.lower()
+        if "korting" in line_lower or "subtotaal" in line_lower:
+            continue
+        
+        match = re.search(r'(?:totaal|total|eur|pin)[^\d]*(\d+[.,‚]\d{2})', line_lower)
+        if match:
             try:
-                val_str = m.replace('‚', '.').replace(',', '.')
-                val = float(val_str)
+                val = float(match.group(1).replace('‚', '.').replace(',', '.'))
                 if val > 0:
                     totaal = val
                     break
             except ValueError:
-                continue
+                pass
 
-    # 3. Statiegeld (pakt ook 'STAT IEGELD ) ‚15' of ',15')
-    statie_match = re.search(r'stat[a-z\s]*geld[^\d,.‚]*(\d*[,.‚]\d{2})', text_lower)
-    if statie_match:
-        try:
-            raw_val = statie_match.group(1).replace('‚', '.').replace(',', '.')
-            if raw_val.startswith('.'):
-                raw_val = "0" + raw_val
-            statiegeld = float(raw_val)
-        except ValueError:
-            pass
+    # 3. Statiegeld (Zoekt specifiek op de regel waar statiegeld staat)
+    for line in lines:
+        line_lower = line.lower()
+        if "stat" in line_lower and "geld" in line_lower:
+            match = re.search(r'(\d*[,.‚]\d{2})', line_lower)
+            if match:
+                try:
+                    raw_val = match.group(1).replace('‚', '.').replace(',', '.')
+                    if raw_val.startswith('.'):
+                        raw_val = "0" + raw_val
+                    statiegeld = float(raw_val)
+                    break
+                except ValueError:
+                    pass
 
     # 4. Datum (DD-MM-YYYY of DD/MM/YYYY)
     datum_match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', text)
@@ -103,14 +110,21 @@ if uploaded_file is not None:
     
     st.image(image, caption="Geüploade Kassabon", use_container_width=True)
 
-    with st.spinner("OCR verwerken en gegevens uitlezen..."):
+    with st.spinner("OCR verwerken en afbeelding optimaliseren..."):
+        # Image preprocessing
         gray_image = image.convert("L")
+        enhancer = ImageEnhance.Contrast(gray_image)
+        contrast_image = enhancer.enhance(2.0)
+        
+        # PSM 6 leest de bon regel voor regel van links naar rechts
+        custom_config = r'--psm 6'
+        
         try:
-            text = pytesseract.image_to_string(gray_image, lang="nld")
+            text = pytesseract.image_to_string(contrast_image, lang="nld", config=custom_config)
         except Exception:
-            text = pytesseract.image_to_string(gray_image)
+            text = pytesseract.image_to_string(contrast_image, config=custom_config)
 
-        # Automatische data-extractie via geoptimaliseerde parser
+        # Automatische data-extractie
         auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
 
     st.subheader("Geëxtraheerde Tekst")
