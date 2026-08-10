@@ -6,11 +6,21 @@ import pandas as pd
 import datetime
 import io
 import re
+import numpy as np
+
+try:
+    from pyzbar.pyzbar import decode as decode_barcodes
+except ImportError:
+    decode_barcodes = None
 
 # 1. Page Configuration
 st.set_page_config(page_title="Kassabonnen Scanner", page_icon="🧾", layout="centered")
 
 st.title("🧾 Kassabonnen Scanner")
+
+# Initialize Session State for Barcode Data
+if "found_barcodes" not in st.session_state:
+    st.session_state["found_barcodes"] = ""
 
 # 2. Supabase Instellingen uit Secrets
 try:
@@ -102,8 +112,26 @@ except Exception as e:
 st.divider()
 
 # ---------------------------------------------------------
-# 4. GEAVANCEERDE PARSER FUNCTIE
+# 4. GEAVANCEERDE PARSER FUNCTIE & BARCODE DETECTIE
 # ---------------------------------------------------------
+def scan_barcodes_from_image(pil_img):
+    """Detecteert Barcodes en QR-codes op de afbeelding."""
+    detected_codes = []
+    if decode_barcodes is None:
+        st.error("Het pakket 'pyzbar' is niet beschikbaar.")
+        return detected_codes
+    
+    try:
+        cv_img = np.array(pil_img)
+        barcodes = decode_barcodes(cv_img)
+        for barcode in barcodes:
+            code_data = barcode.data.decode('utf-8')
+            code_type = barcode.type
+            detected_codes.append(f"{code_type}: {code_data}")
+    except Exception as e:
+        st.warning(f"Fout bij scannen barcode: {e}")
+    return detected_codes
+
 def parse_receipt_text(text):
     text_clean = re.sub(r't\s*o\s*t\s*a\s*a\s*l', 'totaal', text, flags=re.IGNORECASE)
     text_clean = re.sub(r's\s*u\s*b\s*t\s*o\s*t\s*a\s*a\s*l', 'subtotaal', text_clean, flags=re.IGNORECASE)
@@ -246,7 +274,9 @@ if uploaded_file is not None:
     st.image(image, caption="Geüploade Kassabon", use_container_width=True)
 
     text = ""
-    with st.spinner("OCR verwerken en afbeelding optimaliseren..."):
+    
+    # 1. Alleen OCR bij de standaard upload
+    with st.spinner("OCR verwerken en tekst analyseren..."):
         try:
             w, h = image.size
             if w < 1000:
@@ -286,144 +316,32 @@ if uploaded_file is not None:
         statiegeld = st.number_input("Statiegeld (€)", value=auto_statiegeld, min_value=0.0, format="%.2f")
         categorie = st.selectbox("Categorie", ["Boodschappen", "Huishouden", "Hobby / Electronica", "Overig"])
 
+    # --- KNOP OM SPECIFIEK BARCODE / QR TE SCANNEN ---
+    st.markdown("---")
+    st.markdown("**🔍 Optioneel: Barcode / QR-code Scannen**")
+    
+    col_scan1, col_scan2 = st.columns([1, 2])
+    with col_scan1:
+        if st.button("📷 Scan Barcode op foto"):
+            with st.spinner("Scannen op barcodes/QR-codes..."):
+                found = scan_barcodes_from_image(image)
+                if found:
+                    st.session_state["found_barcodes"] = " | ".join(found)
+                    st.success(f"Barcode(s) gevonden!")
+                else:
+                    st.session_state["found_barcodes"] = ""
+                    st.info("Geen barcode of QR-code gevonden.")
+
+    with col_scan2:
+        barcode_input = st.text_input(
+            "Gescande Barcode / QR Data", 
+            value=st.session_state["found_barcodes"]
+        )
+
     st.markdown("---")
     st.markdown("**💳 Betaalmethodes (Max. 5)**")
     
     aantal_methodes = st.number_input("Aantal gebruikte betaalmethodes", min_value=1, max_value=5, value=1, step=1)
 
     betaal_lijst = []
-    betaal_opties = ["Pin", "Contant", "Creditcard", "Cadeaubon", "Anders"]
-    
-    opgeteld_bedrag = 0.0
-
-    for i in range(int(aantal_methodes)):
-        col_bm1, col_bm2 = st.columns(2)
-        
-        # Bepaal het automatisch resterende bedrag voor de huidige stap
-        resterend = max(0.0, totaal_bedrag - opgeteld_bedrag)
-        
-        with col_bm1:
-            def_idx = betaal_opties.index(auto_betaalmethode) if (i == 0 and auto_betaalmethode in betaal_opties) else (1 if i == 1 else 0)
-            bm_type = st.selectbox(f"Betaalmethode {i+1}", betaal_opties, index=def_idx, key=f"bm_type_{i}")
-        
-        with col_bm2:
-            # Als dit het laatste veld is, vul het restant in. Anders ook standaard het restant.
-            bm_bedrag = st.number_input(
-                f"Bedrag Methode {i+1} (€)", 
-                min_value=0.0, 
-                max_value=totaal_bedrag,
-                value=round(resterend, 2), 
-                format="%.2f", 
-                key=f"bm_bedrag_{i}"
-            )
-        
-        opgeteld_bedrag += bm_bedrag
-        betaal_lijst.append(f"{bm_type}: €{bm_bedrag:.2f}")
-
-    # Resterend saldo feedback
-    verschil = totaal_bedrag - opgeteld_bedrag
-    if abs(verschil) < 0.01:
-        st.caption("✅ Het totaal van de betaalmethodes komt exact overeen met het totaalbedrag.")
-    elif verschil > 0:
-        st.info(f"💡 Er blijft nog **€ {verschil:.2f}** over om te verdelen.")
-    else:
-        st.warning(f"⚠️ Het totaal van de betaalmethodes is **€ {abs(verschil):.2f}** hoger dan het totaalbedrag.")
-
-    gecombineerde_betaalwijze = " | ".join(betaal_lijst)
-
-    st.markdown("---")
-
-    # Statiegeld koppeling met Terug Bedrag
-    default_terug_bedrag = statiegeld if statiegeld > 0 else 0.0
-    default_retour = True if statiegeld > 0 else False
-
-    terug_bedrag = st.number_input("Terug bedrag / Geld terug (€)", value=default_terug_bedrag, min_value=0.0, format="%.2f")
-    retour_status = st.checkbox("Retour verwerkt", value=default_retour)
-
-    st.markdown("**Wie betaalt deze uitgave?**")
-    zelf_optie = st.radio(
-        "Kies uitgavetype",
-        ["Zelf", "Niet zelf", "Gedeeltelijk zelf"],
-        horizontal=True,
-        label_visibility="collapsed"
-    )
-
-    eigen_bedrag = totaal_bedrag
-    if zelf_optie == "Gedeeltelijk zelf":
-        eigen_bedrag = st.number_input(
-            "Voer je eigen bedrag in (€)",
-            min_value=0.0,
-            max_value=totaal_bedrag,
-            value=round(totaal_bedrag / 2, 2),
-            format="%.2f"
-        )
-    elif zelf_optie == "Niet zelf":
-        eigen_bedrag = 0.0
-
-    if st.button("💾 Opslaan in Database", type="primary"):
-        with st.spinner("Opslaan in Supabase..."):
-            try:
-                img_bytes = io.BytesIO()
-                image.convert("RGB").save(img_bytes, format="JPEG")
-                img_data = img_bytes.getvalue()
-                
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"bon_{timestamp}.jpg"
-                
-                supabase.storage.from_("bonnen-fotos").upload(
-                    path=filename,
-                    file=img_data,
-                    file_options={"content-type": "image/jpeg"}
-                )
-                
-                image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
-                
-                data = {
-                    "datum": str(datum),
-                    "winkel": winkel,
-                    "totaalprijs": totaal_bedrag,
-                    "statiegeld": statiegeld,
-                    "betaalwijze": gecombineerde_betaalwijze,
-                    "categorie": categorie,
-                    "zelf": zelf_optie,
-                    "eigen_bedrag": eigen_bedrag,
-                    "retour": "Ja" if retour_status else "Nee",
-                    "terug_bedrag": terug_bedrag,
-                    "afbeelding_url": image_url
-                }
-                
-                supabase.table("kassabonnen").insert(data).execute()
-                st.success("✅ Kassabon succesvol opgeslagen!")
-                st.rerun()
-            except Exception as err:
-                st.error(f"Fout bij opslaan: {err}")
-
-st.divider()
-
-# ---------------------------------------------------------
-# 6. OVERZICHTSTABEL & EXCEL EXPORT
-# ---------------------------------------------------------
-st.subheader("📊 Inzage & Excel Export")
-
-if st.button("Laden van opgeslagen bonnen"):
-    try:
-        res = supabase.table("kassabonnen").select("*").execute()
-        if res.data:
-            df = pd.DataFrame(res.data)
-            st.dataframe(df)
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Kassabonnen")
-            excel_data = output.getvalue()
-            
-            st.download_button(
-                label="📥 Download als Excel-bestand",
-                data=excel_data,
-                file_name=f"kassabonnen_export_{datetime.date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("Nog geen kassabonnen gevonden in de database.")
-    except Exception as err:
-        st.error(f"Fout bij ophalen van gegevens: {err}")
+    betaal_opties =
