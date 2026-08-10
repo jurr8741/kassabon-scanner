@@ -20,9 +20,43 @@ try:
 except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
-# 3. Geavanceerde Parser Functie
+# ---------------------------------------------------------
+# 3. OVERZICHT BOVENAAN DE PAGINA
+# ---------------------------------------------------------
+st.subheader("📈 Overzicht Uitgaven")
+
+try:
+    res = supabase.table("kassabonnen").select("*").execute()
+    if res.data:
+        df_stats = pd.DataFrame(res.data)
+        
+        # Zorg dat numerieke kolommen goed berekend worden
+        df_stats["totaalprijs"] = pd.to_numeric(df_stats.get("totaalprijs", 0), errors="coerce").fillna(0)
+        
+        totaal_uitgaven = df_stats["totaalprijs"].sum()
+        
+        # Filteren op 'Zelf' en 'Niet zelf'
+        zelf_total = df_stats[df_stats["zelf"] == "Zelf"]["totaalprijs"].sum()
+        niet_zelf_total = df_stats[df_stats["zelf"] == "Niet zelf"]["totaalprijs"].sum()
+        
+        # Als er ook "Gedeeltelijk zelf" is opgeslagen, telt dat op bij het totaal overzicht
+        gedeeltelijk_total = df_stats[df_stats["zelf"] == "Gedeeltelijk zelf"]["totaalprijs"].sum()
+
+        col_stat1, col_stat2, col_stat3 = st.columns(3)
+        col_stat1.metric("Totaal Uitgegeven", f"€ {totaal_uitgaven:.2f}")
+        col_stat2.metric("Zelf", f"€ {zelf_total:.2f}")
+        col_stat3.metric("Niet Zelf", f"€ {niet_zelf_total:.2f}")
+    else:
+        st.info("Nog geen uitgaven opgeslagen om een overzicht te tonen.")
+except Exception as e:
+    st.warning("Kon het uitgavenoverzicht niet laden uit Supabase.")
+
+st.divider()
+
+# ---------------------------------------------------------
+# 4. GEAVANCEERDE PARSER FUNCTIE
+# ---------------------------------------------------------
 def parse_receipt_text(text):
-    # Verwijder spaties tussen letters in specifieke woorden zoals "T o t a a l"
     text_clean = re.sub(r't\s*o\s*t\s*a\s*a\s*l', 'totaal', text, flags=re.IGNORECASE)
     text_clean = re.sub(r's\s*u\s*b\s*t\s*o\s*t\s*a\s*a\s*l', 'subtotaal', text_clean, flags=re.IGNORECASE)
     
@@ -35,7 +69,7 @@ def parse_receipt_text(text):
     datum = datetime.date.today()
     betaalmethode = "Pin"
     
-    # 1. Winkelherkenning (inclusief OCR-variaties zoals 'poress')
+    # 1. Winkelherkenning
     if any(k in text_lower for k in ["poiesz", "polesz", "poies", "po1esz", "poress"]):
         winkel = "Poiesz"
     elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl", "albert"]):
@@ -51,7 +85,7 @@ def parse_receipt_text(text):
     elif "dirk" in text_lower:
         winkel = "Dirk"
 
-    # 2. Datum (DD-MM-YYYY, YYYY/MM/DD, DD.MM.YYYY, etc.)
+    # 2. Datum
     datum_matches = re.findall(r'\b(\d{1,4})[-/. ](\d{1,2})[-/. ](\d{1,4})\b', text_clean)
     for p1, p2, p3 in datum_matches:
         try:
@@ -86,7 +120,6 @@ def parse_receipt_text(text):
                 except Exception:
                     pass
 
-    # Helper functie voor bedragen
     def extract_amounts(s):
         found = []
         matches = re.findall(r'(\d*[,.‚]\d{2})', s)
@@ -103,13 +136,11 @@ def parse_receipt_text(text):
         return found
 
     # 4. Totaalbedrag
-    # Stap A: Zoek op regels met 'totaal' of 'subtotaal' (sluit BTW en KORTING uit)
     for idx, line in enumerate(reversed(lines)):
         real_idx = len(lines) - 1 - idx
         l_low = line.lower()
         
         if any(k in l_low for k in ["totaal", "subtotaal", "te betalen", "bedrag"]):
-            # Negeer regels die gaan over BTW, korting of wisselgeld!
             if any(x in l_low for x in ["btw", "korting", "wisselgeld"]):
                 continue
             
@@ -121,7 +152,6 @@ def parse_receipt_text(text):
                 totaal = max(amounts)
                 break
 
-    # Stap B: Fallback naar PIN / EUR / € regels
     if totaal == 0.0:
         for idx, line in enumerate(reversed(lines)):
             l_low = line.lower()
@@ -133,7 +163,6 @@ def parse_receipt_text(text):
                     totaal = max(amounts)
                     break
 
-    # Stap C: Fallback naar het hoogste geldige bedrag op de bon
     if totaal == 0.0:
         all_amounts = []
         for line in lines:
@@ -154,7 +183,9 @@ def parse_receipt_text(text):
 
     return winkel, datum, totaal, statiegeld, betaalmethode
 
-# 4. Upload & Camera Functionaliteit
+# ---------------------------------------------------------
+# 5. UPLOAD & VERWERKING
+# ---------------------------------------------------------
 uploaded_file = st.file_uploader(
     "Upload of maak een foto van een kassabon", 
     type=["jpg", "jpeg", "png"]
@@ -212,8 +243,32 @@ if uploaded_file is not None:
         
         categorie = st.selectbox("Categorie", ["Boodschappen", "Huishouden", "Hobby / Electronica", "Overig"])
 
-    is_self = st.checkbox("Eigen uitgave (Self)", value=True)
-    retour_status = st.checkbox("Retour verwerkt", value=False)
+    # Statiegeld koppeling met Terug Bedrag
+    default_terug_bedrag = statiegeld if statiegeld > 0 else 0.0
+    default_retour = True if statiegeld > 0 else False
+
+    terug_bedrag = st.number_input("Terug bedrag / Geld terug (€)", value=default_terug_bedrag, min_value=0.0, format="%.2f")
+    retour_status = st.checkbox("Retour verwerkt", value=default_retour)
+
+    st.markdown("**Wie betaalt deze uitgave?**")
+    zelf_optie = st.radio(
+        "Kies uitgavetype",
+        ["Zelf", "Niet zelf", "Gedeeltelijk zelf"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    eigen_bedrag = totaal_bedrag
+    if zelf_optie == "Gedeeltelijk zelf":
+        eigen_bedrag = st.number_input(
+            "Voer je eigen bedrag in (€)",
+            min_value=0.0,
+            max_value=totaal_bedrag,
+            value=round(totaal_bedrag / 2, 2),
+            format="%.2f"
+        )
+    elif zelf_optie == "Niet zelf":
+        eigen_bedrag = 0.0
 
     if st.button("💾 Opslaan in Database", type="primary"):
         with st.spinner("Opslaan in Supabase..."):
@@ -233,7 +288,6 @@ if uploaded_file is not None:
                 
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
-                # Afgestemd op de exacte kolomnamen van jouw Supabase tabel
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
@@ -241,20 +295,23 @@ if uploaded_file is not None:
                     "statiegeld": statiegeld,
                     "betaalwijze": betaalmethode,
                     "categorie": categorie,
-                    "zelf": "Ja" if is_self else "Nee",
+                    "zelf": zelf_optie,
                     "retour": "Ja" if retour_status else "Nee",
-                    "terug_bedrag": 0.0,
+                    "terug_bedrag": terug_bedrag,
                     "afbeelding_url": image_url
                 }
                 
                 supabase.table("kassabonnen").insert(data).execute()
                 st.success("✅ Kassabon succesvol opgeslagen!")
+                st.rerun()
             except Exception as err:
                 st.error(f"Fout bij opslaan: {err}")
 
 st.divider()
 
-# 5. Overzicht & Excel Export
+# ---------------------------------------------------------
+# 6. OVERZICHTSTABEL & EXCEL EXPORT
+# ---------------------------------------------------------
 st.subheader("📊 Inzage & Excel Export")
 
 if st.button("Laden van opgeslagen bonnen"):
