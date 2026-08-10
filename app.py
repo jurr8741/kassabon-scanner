@@ -20,9 +20,9 @@ try:
 except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
-# 3. Geavanceerde Parser Functie
+# 3. Geavanceerde Parser Functie met Exacte Woordgrenzen
 def parse_receipt_text(text):
-    lines = text.split('\n')
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
     text_lower = text.lower()
     
     winkel = ""
@@ -47,13 +47,44 @@ def parse_receipt_text(text):
     elif "dirk" in text_lower:
         winkel = "Dirk"
 
-    # 2. Totaalbedrag (Slaat regels met 'korting' en 'subtotaal' expliciet over)
+    # 2. Datum (DD-MM-YYYY, DD/MM/YYYY of D-M-YYYY)
+    datum_matches = re.findall(r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b', text)
+    for d_str, m_str, y_str in datum_matches:
+        try:
+            d, m, y = int(d_str), int(m_str), int(y_str)
+            if y < 100:
+                y += 2000
+            if 1 <= m <= 12 and 1 <= d <= 31 and 2000 <= y <= 2030:
+                datum = datetime.date(y, m, d)
+                break
+        except ValueError:
+            continue
+
+    # 3. Statiegeld (Zoekt specifiek op de regel waar 'statie' of 'statiegeld' staat)
+    for line in lines:
+        l_low = line.lower()
+        if "stat" in l_low:
+            match = re.search(r'(\d*[,.‚]\d{2})', l_low)
+            if match:
+                try:
+                    raw = match.group(1).replace('‚', '.').replace(',', '.')
+                    if raw.startswith('.'):
+                        raw = "0" + raw
+                    val = float(raw)
+                    if val > 0:
+                        statiegeld = val
+                        break
+                except ValueError:
+                    pass
+
+    # 4. Totaalbedrag
+    # \btotaal\b zorgt dat 'totale' (zoals in 'totale korting') NIET matcht
     for line in reversed(lines):
-        line_lower = line.lower()
-        if "korting" in line_lower or "subtotaal" in line_lower:
+        l_low = line.lower()
+        if "korting" in l_low:
             continue
         
-        match = re.search(r'(?:totaal|total|eur|pin)[^\d]*(\d+[.,‚]\d{2})', line_lower)
+        match = re.search(r'(?:\btotaal\b|subtotaal|\beur\b|\bpin\b)[^\d]*(\d+[.,‚]\d{2})', l_low)
         if match:
             try:
                 val = float(match.group(1).replace('‚', '.').replace(',', '.'))
@@ -62,32 +93,6 @@ def parse_receipt_text(text):
                     break
             except ValueError:
                 pass
-
-    # 3. Statiegeld (Zoekt specifiek op de regel waar statiegeld staat)
-    for line in lines:
-        line_lower = line.lower()
-        if "stat" in line_lower and "geld" in line_lower:
-            match = re.search(r'(\d*[,.‚]\d{2})', line_lower)
-            if match:
-                try:
-                    raw_val = match.group(1).replace('‚', '.').replace(',', '.')
-                    if raw_val.startswith('.'):
-                        raw_val = "0" + raw_val
-                    statiegeld = float(raw_val)
-                    break
-                except ValueError:
-                    pass
-
-    # 4. Datum (DD-MM-YYYY of DD/MM/YYYY)
-    datum_match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', text)
-    if datum_match:
-        try:
-            d, m, y = map(int, datum_match.groups())
-            if y < 100:
-                y += 2000
-            datum = datetime.date(y, m, d)
-        except ValueError:
-            pass
 
     # 5. Betaalmethode
     if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip", "maestro"]):
@@ -111,7 +116,7 @@ if uploaded_file is not None:
     st.image(image, caption="Geüploade Kassabon", use_container_width=True)
 
     with st.spinner("OCR verwerken en afbeelding optimaliseren..."):
-        # Image preprocessing
+        # Image preprocessing voor beter contrast
         gray_image = image.convert("L")
         enhancer = ImageEnhance.Contrast(gray_image)
         contrast_image = enhancer.enhance(2.0)
@@ -217,3 +222,4 @@ if st.button("Laden van opgeslagen bonnen"):
             st.info("Nog geen kassabonnen gevonden in de database.")
     except Exception as err:
         st.error(f"Fout bij ophalen van gegevens: {err}")
+
