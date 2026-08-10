@@ -20,7 +20,7 @@ try:
 except Exception as e:
     st.error("Kon niet verbinden met Supabase. Controleer de secrets in Streamlit Cloud.")
 
-# 3. Geavanceerde Parser Functie met Exacte Woordgrenzen
+# 3. Geavanceerde Parser Functie
 def parse_receipt_text(text):
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     text_lower = text.lower()
@@ -32,9 +32,9 @@ def parse_receipt_text(text):
     betaalmethode = "Pin"
     
     # 1. Winkelherkenning
-    if any(k in text_lower for k in ["poiesz", "polesz", "poies"]):
+    if any(k in text_lower for k in ["poiesz", "polesz", "poies", "po1esz"]):
         winkel = "Poiesz"
-    elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl"]):
+    elif any(k in text_lower for k in ["albert heijn", " ah ", "ah.nl", "albert"]):
         winkel = "Albert Heijn"
     elif "jumbo" in text_lower:
         winkel = "Jumbo"
@@ -47,23 +47,31 @@ def parse_receipt_text(text):
     elif "dirk" in text_lower:
         winkel = "Dirk"
 
-    # 2. Datum (DD-MM-YYYY, DD/MM/YYYY of D-M-YYYY)
-    datum_matches = re.findall(r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b', text)
-    for d_str, m_str, y_str in datum_matches:
+    # 2. Datum (Ondersteunt DD-MM-YYYY, YYYY/MM/DD, DD.MM.YYYY, etc.)
+    # Vangt zowel DD-MM-YYYY als YYYY-MM-DD
+    datum_matches = re.findall(r'\b(\d{1,4})[-/. ](\d{1,2})[-/. ](\d{1,4})\b', text)
+    for p1, p2, p3 in datum_matches:
         try:
-            d, m, y = int(d_str), int(m_str), int(y_str)
-            if y < 100:
-                y += 2000
-            if 1 <= m <= 12 and 1 <= d <= 31 and 2000 <= y <= 2030:
-                datum = datetime.date(y, m, d)
+            v1, v2, v3 = int(p1), int(p2), int(p3)
+            # Scenario YYYY-MM-DD
+            if v1 > 1000 and 1 <= v2 <= 12 and 1 <= v3 <= 31:
+                datum = datetime.date(v1, v2, v3)
                 break
-        except ValueError:
+            # Scenario DD-MM-YYYY of DD-MM-YY
+            else:
+                d, m, y = v1, v2, v3
+                if y < 100:
+                    y += 2000
+                if 1 <= m <= 12 and 1 <= d <= 31 and 2000 <= y <= 2030:
+                    datum = datetime.date(y, m, d)
+                    break
+        except Exception:
             continue
 
-    # 3. Statiegeld (Zoekt specifiek op de regel waar 'statie' of 'statiegeld' staat)
+    # 3. Statiegeld (Zoekt specifiek op statiegeld regels)
     for line in lines:
         l_low = line.lower()
-        if "stat" in l_low:
+        if "stat" in l_low or "emballage" in l_low:
             match = re.search(r'(\d*[,.‚]\d{2})', l_low)
             if match:
                 try:
@@ -71,17 +79,17 @@ def parse_receipt_text(text):
                     if raw.startswith('.'):
                         raw = "0" + raw
                     val = float(raw)
-                    if val > 0:
+                    if 0.05 <= val <= 10.0:
                         statiegeld = val
                         break
-                except ValueError:
+                except Exception:
                     pass
 
     # 4. Totaalbedrag
-    # \btotaal\b zorgt dat 'totale' (zoals in 'totale korting') NIET matcht
+    # Stap A: Direct zoeken naar trefwoorden t.o.v. bedragen
     for line in reversed(lines):
         l_low = line.lower()
-        if "korting" in l_low:
+        if "korting" in l_low or "wisselgeld" in l_low or "punten" in l_low:
             continue
         
         match = re.search(r'(?:\btotaal\b|subtotaal|\beur\b|\bpin\b)[^\d]*(\d+[.,‚]\d{2})', l_low)
@@ -91,11 +99,29 @@ def parse_receipt_text(text):
                 if val > 0:
                     totaal = val
                     break
-            except ValueError:
+            except Exception:
                 pass
 
+    # Stap B: Fallback - pak het hoogste aannemelijke bedrag op de bon
+    if totaal == 0.0:
+        all_amounts = []
+        for line in lines:
+            l_low = line.lower()
+            if any(x in l_low for x in ["korting", "wisselgeld", "kaart", "transactie", "terminal", "autorisatie", "kassa"]):
+                continue
+            matches = re.findall(r'(\d+[.,‚]\d{2})', line)
+            for m in matches:
+                try:
+                    v = float(m.replace('‚', '.').replace(',', '.'))
+                    if 0.10 <= v <= 500.0:
+                        all_amounts.append(v)
+                except Exception:
+                    pass
+        if all_amounts:
+            totaal = max(all_amounts)
+
     # 5. Betaalmethode
-    if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip", "maestro"]):
+    if any(k in text_lower for k in ["debit", "mastercard", "visa", "pin", "chip", "maestro", "contactloos"]):
         betaalmethode = "Pin"
     elif any(k in text_lower for k in ["contant", "cash", "wisselgeld"]):
         betaalmethode = "Contant"
@@ -110,27 +136,37 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    # Herstel EXIF-rotatie van telefoons
     image = ImageOps.exif_transpose(image)
     
     st.image(image, caption="Geüploade Kassabon", use_container_width=True)
 
+    text = ""
     with st.spinner("OCR verwerken en afbeelding optimaliseren..."):
-        # Image preprocessing voor beter contrast
-        gray_image = image.convert("L")
-        enhancer = ImageEnhance.Contrast(gray_image)
-        contrast_image = enhancer.enhance(2.0)
-        
-        # PSM 6 leest de bon regel voor regel van links naar rechts
-        custom_config = r'--psm 6'
-        
         try:
-            text = pytesseract.image_to_string(contrast_image, lang="nld", config=custom_config)
-        except Exception:
-            text = pytesseract.image_to_string(contrast_image, config=custom_config)
+            # Afbeelding vergroten voor betere OCR van kleine letters op bonnen
+            w, h = image.size
+            if w < 1000:
+                scale = 1000 / w
+                image_resized = image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+            else:
+                image_resized = image
+
+            gray_image = image_resized.convert("L")
+            enhancer = ImageEnhance.Contrast(gray_image)
+            contrast_image = enhancer.enhance(1.8)
+            
+            # Probeer OCR met algemene PSM instelling
+            text = pytesseract.image_to_string(contrast_image, lang="nld", config=r'--psm 3')
+            if not text.strip():
+                text = pytesseract.image_to_string(contrast_image, config=r'--psm 6')
+        except Exception as ocr_err:
+            st.warning(f"OCR kon de afbeelding niet volledig verwerken: {ocr_err}")
 
         # Automatische data-extractie
-        auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
+        try:
+            auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = parse_receipt_text(text)
+        except Exception:
+            auto_winkel, auto_datum, auto_totaal, auto_statiegeld, auto_betaalmethode = "", datetime.date.today(), 0.0, 0.0, "Pin"
 
     st.subheader("Geëxtraheerde Tekst")
     with st.expander("Bekijk ruwe OCR-tekst"):
@@ -159,7 +195,6 @@ if uploaded_file is not None:
     if st.button("💾 Opslaan in Database", type="primary"):
         with st.spinner("Opslaan in Supabase..."):
             try:
-                # Converteren naar bytes voor upload
                 img_bytes = io.BytesIO()
                 image.convert("RGB").save(img_bytes, format="JPEG")
                 img_data = img_bytes.getvalue()
@@ -167,17 +202,14 @@ if uploaded_file is not None:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"bon_{timestamp}.jpg"
                 
-                # 1. Foto uploaden naar Storage Bucket
                 supabase.storage.from_("bonnen-fotos").upload(
                     path=filename,
                     file=img_data,
                     file_options={"content-type": "image/jpeg"}
                 )
                 
-                # Publieke URL ophalen
                 image_url = supabase.storage.from_("bonnen-fotos").get_public_url(filename)
                 
-                # 2. Opslaan in database tabel
                 data = {
                     "datum": str(datum),
                     "winkel": winkel,
@@ -222,4 +254,3 @@ if st.button("Laden van opgeslagen bonnen"):
             st.info("Nog geen kassabonnen gevonden in de database.")
     except Exception as err:
         st.error(f"Fout bij ophalen van gegevens: {err}")
-
