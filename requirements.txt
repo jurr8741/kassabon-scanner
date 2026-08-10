@@ -7,4 +7,3 @@ openpyxl
 opencv-python-headless
 pyzbar
 numpy
-libzbar0
